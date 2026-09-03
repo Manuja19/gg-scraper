@@ -36,26 +36,48 @@ module.exports = async function handler(req, res) {
       const sourcesMatch = embedHtml.match(/var videoSources = (\[[\s\S]*?\]);/);
       
       if (sourcesMatch) {
-        // Updated regex to capture the 'bk' (backup) field
-        const regex = /\{file:\s*"([^"]+)",\s*label:\s*"([^"]+)",\s*bk:\s*"([^"]+)"/g;
+        const regex = /\{file:\s*"([^"]+)",\s*label:\s*"([^"]+)",\s*bk:\s*"([^"]*)"/g;
         let match;
         while ((match = regex.exec(sourcesMatch[1])) !== null) {
           const base64Bk = match[3];
+          const label = match[2];
           
+          if (!base64Bk) continue; // Skip if no backup link
+
           try {
-            // Decode the base64 string, then URL decode it to get the direct CDN link
+            // Decode the base64 string, then URL decode it
             const decodedBk = Buffer.from(base64Bk, 'base64').toString('utf8');
-            const directCdnUrl = decodeURIComponent(decodedBk);
-            
-            // Force HTTPS if the decoded URL is HTTP (some CDNs accept both, HTTPS is safer for frontend)
-            const finalUrl = directCdnUrl.replace(/^http:\/\//i, 'https://');
-            
-            result[type].push({ 
-              resolution: match[2], 
-              url: finalUrl // Direct CDN link! Zero Vercel bandwidth used.
-            });
+            let finalUrl = decodeURIComponent(decodedBk);
+
+            // Check if it's already a direct video link
+            if (finalUrl.includes('.mp4') || finalUrl.includes('.m3u8')) {
+              result[type].push({ resolution: label, url: finalUrl.replace(/^http:\/\//i, 'https://') });
+            } 
+            // If it's an embed page (like mp4upload), scrape it for the real MP4
+            else if (finalUrl.includes('http')) {
+              const embedPageResponse = await fetch(finalUrl, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Referer': 'https://www.animegg.org/' }
+              });
+              
+              if (embedPageResponse.ok) {
+                const embedPageHtml = await embedPageResponse.text();
+                
+                // Skip if the file was deleted
+                if (embedPageHtml.includes('File was deleted') || embedPageHtml.includes('Video is processing')) {
+                  continue;
+                }
+
+                // Try to extract direct mp4 link from the embed page's JavaScript
+                const mp4Match = embedPageHtml.match(/(?:file|src|url):\s*["'](https?:\/\/[^"']+\.mp4[^"']*)["']/i) || 
+                                 embedPageHtml.match(/["'](https?:\/\/[^"']+\.mp4\?[^"']*)["']/i);
+                
+                if (mp4Match && mp4Match[1]) {
+                  result[type].push({ resolution: label, url: mp4Match[1] });
+                }
+              }
+            }
           } catch (decodeError) {
-            console.error('Failed to decode bk URL:', decodeError);
+            console.error('Failed to process bk URL:', decodeError);
           }
         }
       }
@@ -65,7 +87,7 @@ module.exports = async function handler(req, res) {
     if (dubbedMatch) await extractSources(dubbedMatch[1], 'dubbed');
 
     if (result.subbed.length === 0 && result.dubbed.length === 0) {
-      return res.status(404).json({ error: 'No video sources found' });
+      return res.status(404).json({ error: 'No valid video sources found (files may be deleted)' });
     }
 
     return res.status(200).json(result);
