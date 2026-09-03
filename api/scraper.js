@@ -11,8 +11,6 @@ module.exports = async function handler(req, res) {
   }
 
   const targetUrl = `https://www.animegg.org/${slug}-episode-${episode}`;
-  // Determine the host dynamically (works on localhost and Vercel)
-  const host = req.headers.host || 'gg-scraper-olive.vercel.app';
 
   try {
     const response = await fetch(targetUrl, {
@@ -38,14 +36,27 @@ module.exports = async function handler(req, res) {
       const sourcesMatch = embedHtml.match(/var videoSources = (\[[\s\S]*?\]);/);
       
       if (sourcesMatch) {
-        const regex = /\{file:\s*"([^"]+)",\s*label:\s*"([^"]+)"/g;
+        // Updated regex to capture the 'bk' (backup) field
+        const regex = /\{file:\s*"([^"]+)",\s*label:\s*"([^"]+)",\s*bk:\s*"([^"]+)"/g;
         let match;
         while ((match = regex.exec(sourcesMatch[1])) !== null) {
-          const directUrl = `https://www.animegg.org${match[1]}`;
-          // Create a proxied URL that points to YOUR server
-          const proxiedUrl = `https://${host}/api/stream?url=${encodeURIComponent(directUrl)}`;
+          const base64Bk = match[3];
           
-          result[type].push({ resolution: match[2], url: proxiedUrl });
+          try {
+            // Decode the base64 string, then URL decode it to get the direct CDN link
+            const decodedBk = Buffer.from(base64Bk, 'base64').toString('utf8');
+            const directCdnUrl = decodeURIComponent(decodedBk);
+            
+            // Force HTTPS if the decoded URL is HTTP (some CDNs accept both, HTTPS is safer for frontend)
+            const finalUrl = directCdnUrl.replace(/^http:\/\//i, 'https://');
+            
+            result[type].push({ 
+              resolution: match[2], 
+              url: finalUrl // Direct CDN link! Zero Vercel bandwidth used.
+            });
+          } catch (decodeError) {
+            console.error('Failed to decode bk URL:', decodeError);
+          }
         }
       }
     };
